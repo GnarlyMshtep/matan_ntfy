@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import random
+import re
 import shlex
 import socket
 import subprocess
@@ -14,15 +15,17 @@ from pathlib import Path
 from typing import Set
 
 DEFAULT_TRIGGERS = [
-    "Ray Debugger is",
+    "Ray debugger is listening",
     # "ERROR",
     "CUDA out of memory"
 ]
 
 NTFY_TOPIC = "mshtepel-ml-runs"
 NTFY_START_TOPIC = "mshtepel-start-ml-runs"
+NTFY_WANDB_TOPIC = "mshtepel-wandburl-ml-runs"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 NTFY_START_URL = f"https://ntfy.sh/{NTFY_START_TOPIC}"
+NTFY_WANDB_URL = f"https://ntfy.sh/{NTFY_WANDB_TOPIC}"
 
 def get_machine_name():
     return socket.gethostname()
@@ -99,6 +102,8 @@ def get_context_lines(file_path, current_pos, context_size=5):
 def monitor_output_and_process(output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id):
     """Monitor output file for triggers and process for crashes"""
     seen_triggers: Set[str] = set()
+    wandb_url = None
+    wandb_pattern = re.compile(r'wandb:.*?(https://wandb\.ai/\S+)')
     file_pos = 0
 
     # Wait for output file to exist
@@ -134,18 +139,41 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
                         # Get context
                         context = get_context_lines(output_file, file_pos, context_size=5)
 
-                        # Build notification
-                        location = f"Machine: {machine}"
-                        if tmux_session:
-                            location += f"\nTmux: {tmux_session}"
-                        location += f"\nDir: {cwd}"
+                        # Build notification data as JSON (like start/complete events)
+                        trigger_data = {
+                            "event": "trigger",
+                            "run_id": run_id,
+                            "trigger": trigger,
+                            "context": context,
+                            "command": command_str,
+                            "machine": machine,
+                            "tmux": tmux_session,
+                            "cwd": cwd,
+                            "timestamp": datetime.now().isoformat()
+                        }
 
-                        title = f"🔔 Trigger: {trigger}"
-                        message = f"{location}\nCommand: {command_str}\n\nContext:\n{context}"
-
-                        send_notification(title, message, "warning,bell",
-                                        extra_headers={"X-Run-ID": run_id, "X-Event-Type": "trigger"})
+                        send_json_notification(NTFY_URL, trigger_data,
+                                             title=f"🔔 Trigger: {trigger}")
                         print(f"\n[notify] ⚠️  Detected trigger: {trigger}", file=sys.stderr)
+
+                # Check for wandb URL
+                if not wandb_url:
+                    match = wandb_pattern.search(line)
+                    if match:
+                        wandb_url = match.group(1)
+                        print(f"\n[notify] DEBUG: Matched wandb URL in line: {line.strip()}", file=sys.stderr)
+                        print(f"[notify] DEBUG: Extracted URL: {wandb_url}", file=sys.stderr)
+                        wandb_data = {
+                            "event": "wandb",
+                            "run_id": run_id,
+                            "wandb_url": wandb_url,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        print(f"[notify] DEBUG: Sending wandb notification to {NTFY_WANDB_URL}", file=sys.stderr)
+                        print(f"[notify] DEBUG: Data: {wandb_data}", file=sys.stderr)
+                        send_json_notification(NTFY_WANDB_URL, wandb_data,
+                                             title=f"🚀 W&B Run: {run_id[:20]}")
+                        print(f"\n[notify] 🚀 Detected W&B URL: {wandb_url}", file=sys.stderr)
             else:
                 # No new data
                 if returncode is not None:
