@@ -16,6 +16,8 @@ from typing import Set
 
 DEFAULT_TRIGGERS = [
     "Ray debugger is listening",
+    "Traceback (most recent call last):",
+    "Request timed out",
     # "ERROR",
     "CUDA out of memory"
 ]
@@ -133,7 +135,7 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
 
                 # Check for triggers
                 for trigger in triggers:
-                    if trigger in line and trigger not in seen_triggers:
+                    if trigger.lower() in line.lower() and trigger not in seen_triggers:
                         seen_triggers.add(trigger)
 
                         # Get context
