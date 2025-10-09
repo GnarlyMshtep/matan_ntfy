@@ -105,7 +105,7 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
     """Monitor output file for triggers and process for crashes"""
     seen_triggers: Set[str] = set()
     wandb_url = None
-    wandb_pattern = re.compile(r'wandb:.*?(https://wandb\.ai/\S+)')
+    wandb_pattern = re.compile(r'wandb:.*?(https://wandb\.ai/[^\s)>\]]+)')
     file_pos = 0
 
     # Wait for output file to exist
