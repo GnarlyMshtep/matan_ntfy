@@ -105,7 +105,6 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
     """Monitor output file for triggers and process for crashes"""
     seen_triggers: Set[str] = set()
     wandb_url = None
-    wandb_pattern = re.compile(r'wandb:.*?(https://wandb\.ai/[^\s)>\]]+)')
     file_pos = 0
 
     # Wait for output file to exist
@@ -158,24 +157,35 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
                                              title=f"🔔 Trigger: {trigger}")
                         print(f"\n[notify] ⚠️  Detected trigger: {trigger}", file=sys.stderr)
 
-                # Check for wandb URL
-                if not wandb_url:
-                    match = wandb_pattern.search(line)
-                    if match:
-                        wandb_url = match.group(1)
-                        print(f"\n[notify] DEBUG: Matched wandb URL in line: {line.strip()}", file=sys.stderr)
-                        print(f"[notify] DEBUG: Extracted URL: {wandb_url}", file=sys.stderr)
-                        wandb_data = {
-                            "event": "wandb",
-                            "run_id": run_id,
-                            "wandb_url": wandb_url,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        print(f"[notify] DEBUG: Sending wandb notification to {NTFY_WANDB_URL}", file=sys.stderr)
-                        print(f"[notify] DEBUG: Data: {wandb_data}", file=sys.stderr)
-                        send_json_notification(NTFY_WANDB_URL, wandb_data,
-                                             title=f"🚀 W&B Run: {run_id[:20]}")
-                        print(f"\n[notify] 🚀 Detected W&B URL: {wandb_url}", file=sys.stderr)
+                # Check for wandb URL - prioritize run URLs over project URLs
+                if not wandb_url and "wandb:" in line and "https://wandb.ai/" in line:
+                    # Only capture if this is a "View run at" line, not "View project at"
+                    if "View run at" in line:
+                        # Extract URL by finding the https://wandb.ai/ substring
+                        start_idx = line.find("https://wandb.ai/")
+                        if start_idx != -1:
+                            # Find the end of the URL (next whitespace, paren, bracket, or end of line)
+                            rest_of_line = line[start_idx:]
+                            url_end = len(rest_of_line)
+                            for char in [' ', '\n', '\r', '\t', ')', ']', '>']:
+                                idx = rest_of_line.find(char)
+                                if idx != -1 and idx < url_end:
+                                    url_end = idx
+
+                            wandb_url = rest_of_line[:url_end]
+                            print(f"\n[notify] DEBUG: Matched wandb run URL in line: {line.strip()}", file=sys.stderr)
+                            print(f"[notify] DEBUG: Extracted URL: {wandb_url}", file=sys.stderr)
+                            wandb_data = {
+                                "event": "wandb",
+                                "run_id": run_id,
+                                "wandb_url": wandb_url,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            print(f"[notify] DEBUG: Sending wandb notification to {NTFY_WANDB_URL}", file=sys.stderr)
+                            print(f"[notify] DEBUG: Data: {wandb_data}", file=sys.stderr)
+                            send_json_notification(NTFY_WANDB_URL, wandb_data,
+                                                 title=f"🚀 W&B Run: {run_id[:20]}")
+                            print(f"\n[notify] 🚀 Detected W&B URL: {wandb_url}", file=sys.stderr)
             else:
                 # No new data
                 if returncode is not None:
