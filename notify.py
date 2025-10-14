@@ -19,7 +19,11 @@ DEFAULT_TRIGGERS = [
     "Traceback (most recent call last):",
     "Request timed out",
     # "ERROR",
-    "CUDA out of memory"
+    "CUDA out of memory",
+    "Failed",
+    "fail",
+    "Failed writing to file ",
+    "No space",
 ]
 
 NTFY_TOPIC = "mshtepel-ml-runs"
