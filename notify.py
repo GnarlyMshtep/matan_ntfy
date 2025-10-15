@@ -24,6 +24,9 @@ DEFAULT_TRIGGERS = [
     "fail",
     "Failed writing to file ",
     "No space",
+    "preempted",
+    "slurm",
+    "preempt"
 ]
 
 NTFY_TOPIC = "mshtepel-ml-runs"
