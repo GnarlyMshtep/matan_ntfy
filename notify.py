@@ -108,7 +108,7 @@ def get_context_lines(file_path, current_pos, context_size=5):
     except:
         return ""
 
-def monitor_output_and_process(output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id):
+def monitor_output_and_process(output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id, ignore_keywords):
     """Monitor output file for triggers and process for crashes"""
     seen_triggers: Set[str] = set()
     wandb_url = None
@@ -139,10 +139,17 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
             if line:
                 file_pos = f.tell()
 
+                # Check if line should be ignored
+                should_ignore = any(keyword.lower() in line.lower() for keyword in ignore_keywords)
+
                 # Check for triggers
                 for trigger in triggers:
                     if trigger.lower() in line.lower() and trigger not in seen_triggers:
                         seen_triggers.add(trigger)
+
+                        if should_ignore:
+                            print(f"\n[notify] 🔕 Ignoring trigger '{trigger}' due to ignore keyword", file=sys.stderr)
+                            continue
 
                         # Get context
                         context = get_context_lines(output_file, file_pos, context_size=5)
@@ -221,16 +228,17 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
 def main():
     parser = argparse.ArgumentParser(
         description='Run a command with monitoring and notifications',
-        usage='%(prog)s [--triggers TRIGGER ...] command [args ...]'
+        usage='%(prog)s [--watch \'["keyword",...]\'] [--ignore \'["keyword",...]\'] command [args ...]'
     )
-    parser.add_argument('--triggers', nargs='+', help='Additional trigger strings to monitor')
+    parser.add_argument('--watch', type=str, help='JSON array of additional trigger keywords to monitor, e.g., \'["ERROR","WARN"]\'')
+    parser.add_argument('--ignore', type=str, help='JSON array of keywords to ignore - if found in a line, do not send notifications, e.g., \'["fail","Failed"]\'')
     parser.add_argument('command', nargs=argparse.REMAINDER, help='Command to run')
 
     args = parser.parse_args()
 
     if not args.command:
         print("Error: No command specified", file=sys.stderr)
-        print("Usage: notify [--triggers TRIGGER ...] command [args ...]", file=sys.stderr)
+        print("Usage: notify [--watch '[\"keyword\",...]'] [--ignore '[\"keyword\",...]'] command [args ...]", file=sys.stderr)
         sys.exit(1)
 
     # Setup
@@ -238,7 +246,32 @@ def main():
     machine = get_machine_name()
     tmux_session = get_tmux_session()
     cwd = os.getcwd()
-    triggers = DEFAULT_TRIGGERS + (args.triggers or [])
+
+    # Parse watch keywords
+    watch_keywords = []
+    if args.watch:
+        try:
+            watch_keywords = json.loads(args.watch)
+            if not isinstance(watch_keywords, list):
+                print("Error: --watch must be a JSON array", file=sys.stderr)
+                sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON for --watch: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Parse ignore keywords
+    ignore_keywords = []
+    if args.ignore:
+        try:
+            ignore_keywords = json.loads(args.ignore)
+            if not isinstance(ignore_keywords, list):
+                print("Error: --ignore must be a JSON array", file=sys.stderr)
+                sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON for --ignore: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    triggers = DEFAULT_TRIGGERS + watch_keywords
 
     # Create output file
     output_dir = Path.home() / '.notify_logs'
@@ -253,6 +286,10 @@ def main():
     print(f"[notify] 📝 Log: {output_file}", file=sys.stderr)
     print(f"[notify] 📁 Working dir: {cwd}", file=sys.stderr)
     print(f"[notify] 👀 Monitoring for: {', '.join(triggers)}", file=sys.stderr)
+    if watch_keywords:
+        print(f"[notify] ➕ Added watch keywords: {', '.join(watch_keywords)}", file=sys.stderr)
+    if ignore_keywords:
+        print(f"[notify] 🔕 Ignoring lines with: {', '.join(ignore_keywords)}", file=sys.stderr)
     if tmux_session:
         print(f"[notify] 🖥️  Tmux session: {tmux_session}", file=sys.stderr)
     print(f"[notify] 🌐 Machine: {machine}", file=sys.stderr)
@@ -285,7 +322,7 @@ def main():
     # Monitor output and process
     try:
         returncode = monitor_output_and_process(
-            output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id
+            output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id, ignore_keywords
         )
     except KeyboardInterrupt:
         print("\n[notify] ⚠️  Interrupted by user", file=sys.stderr)
