@@ -108,11 +108,13 @@ def get_context_lines(file_path, current_pos, context_size=5):
     except:
         return ""
 
-def monitor_output_and_process(output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id, ignore_keywords):
+def monitor_output_and_process(output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id, ignore_keywords, inactivity_alert_mins):
     """Monitor output file for triggers and process for crashes"""
     seen_triggers: Set[str] = set()
     wandb_url = None
     file_pos = 0
+    last_output_time = time.time()
+    last_inactivity_alert_time = None
 
     # Wait for output file to exist
     timeout = 10  # seconds
@@ -138,6 +140,8 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
             line = f.readline()
             if line:
                 file_pos = f.tell()
+                last_output_time = time.time()  # Reset inactivity timer
+                last_inactivity_alert_time = None  # Reset alert tracking
 
                 # Check if line should be ignored
                 should_ignore = any(keyword.lower() in line.lower() for keyword in ignore_keywords)
@@ -202,6 +206,32 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
                             print(f"\n[notify] 🚀 Detected W&B URL: {wandb_url}", file=sys.stderr)
             else:
                 # No new data
+                # Check for inactivity alert
+                if inactivity_alert_mins is not None:
+                    current_time = time.time()
+                    elapsed_since_output = (current_time - last_output_time) / 60.0  # minutes
+
+                    if elapsed_since_output >= inactivity_alert_mins:
+                        # Check if we should send an alert (either first time or after another interval)
+                        if last_inactivity_alert_time is None or \
+                           (current_time - last_inactivity_alert_time) / 60.0 >= inactivity_alert_mins:
+
+                            inactive_mins = int(elapsed_since_output)
+                            inactivity_data = {
+                                "event": "inactivity",
+                                "run_id": run_id,
+                                "inactive_minutes": inactive_mins,
+                                "command": command_str,
+                                "machine": machine,
+                                "tmux": tmux_session,
+                                "cwd": cwd,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            send_json_notification(NTFY_URL, inactivity_data,
+                                                 title=f"⏸️  No output for {inactive_mins} min")
+                            print(f"\n[notify] ⏸️  Inactivity alert: No output for {inactive_mins} minutes", file=sys.stderr)
+                            last_inactivity_alert_time = current_time
+
                 if returncode is not None:
                     # Process ended
                     if returncode != 0:
@@ -228,17 +258,18 @@ def monitor_output_and_process(output_file, proc, triggers, command_str, machine
 def main():
     parser = argparse.ArgumentParser(
         description='Run a command with monitoring and notifications',
-        usage='%(prog)s [--watch \'["keyword",...]\'] [--ignore \'["keyword",...]\'] command [args ...]'
+        usage='%(prog)s [--watch \'["keyword",...]\'] [--ignore \'["keyword",...]\'] [--inactivity-alert MINS] command [args ...]'
     )
     parser.add_argument('--watch', type=str, help='JSON array of additional trigger keywords to monitor, e.g., \'["ERROR","WARN"]\'')
     parser.add_argument('--ignore', type=str, help='JSON array of keywords to ignore - if found in a line, do not send notifications, e.g., \'["fail","Failed"]\'')
+    parser.add_argument('--inactivity-alert', type=int, metavar='MINS', help='Send alert if no output for MINS minutes, repeat every MINS minutes')
     parser.add_argument('command', nargs=argparse.REMAINDER, help='Command to run')
 
     args = parser.parse_args()
 
     if not args.command:
         print("Error: No command specified", file=sys.stderr)
-        print("Usage: notify [--watch '[\"keyword\",...]'] [--ignore '[\"keyword\",...]'] command [args ...]", file=sys.stderr)
+        print("Usage: notify [--watch '[\"keyword\",...]'] [--ignore '[\"keyword\",...]'] [--inactivity-alert MINS] command [args ...]", file=sys.stderr)
         sys.exit(1)
 
     # Setup
@@ -290,6 +321,8 @@ def main():
         print(f"[notify] ➕ Added watch keywords: {', '.join(watch_keywords)}", file=sys.stderr)
     if ignore_keywords:
         print(f"[notify] 🔕 Ignoring lines with: {', '.join(ignore_keywords)}", file=sys.stderr)
+    if args.inactivity_alert:
+        print(f"[notify] ⏸️  Inactivity alert: {args.inactivity_alert} minutes", file=sys.stderr)
     if tmux_session:
         print(f"[notify] 🖥️  Tmux session: {tmux_session}", file=sys.stderr)
     print(f"[notify] 🌐 Machine: {machine}", file=sys.stderr)
@@ -322,7 +355,7 @@ def main():
     # Monitor output and process
     try:
         returncode = monitor_output_and_process(
-            output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id, ignore_keywords
+            output_file, proc, triggers, command_str, machine, tmux_session, cwd, run_id, ignore_keywords, args.inactivity_alert
         )
     except KeyboardInterrupt:
         print("\n[notify] ⚠️  Interrupted by user", file=sys.stderr)
