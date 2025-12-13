@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""
+s3ls - List S3 bucket contents with nice formatting.
+
+Usage:
+    s3ls                           # List root of data/
+    s3ls <path>                    # List specific path
+    s3ls -l                        # Long format with sizes
+    s3ls -r                        # Recursive listing
+    s3ls --tree                    # Tree view (limited depth)
+
+Examples:
+    s3ls                           # List data/
+    s3ls experiments               # List data/experiments/
+    s3ls experiments/run1 -l       # Long format with sizes
+"""
+import argparse
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from typing import List, Optional
+
+
+BUCKET = "matan-ml-exp-bucket"
+DATA_PREFIX = "data"
+
+
+@dataclass
+class S3Object:
+    name: str
+    is_dir: bool
+    size: Optional[int] = None
+    last_modified: Optional[datetime] = None
+
+
+def format_size(size_bytes: int) -> str:
+    """Format size in human-readable format."""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}K"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f}M"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f}G"
+
+
+def normalize_path(path: str) -> str:
+    """Normalize path to S3 format."""
+    path = path.strip().strip("/")
+
+    # Already has bucket
+    if path.startswith(f"s3://{BUCKET}"):
+        return path
+
+    # Has s3:// prefix with different bucket
+    if path.startswith("s3://"):
+        return path
+
+    # Empty = list data/
+    if not path:
+        return f"s3://{BUCKET}/{DATA_PREFIX}/"
+
+    # Starts with data/ already
+    if path.startswith(f"{DATA_PREFIX}/") or path == DATA_PREFIX:
+        return f"s3://{BUCKET}/{path}/"
+
+    # Otherwise, assume under data/
+    return f"s3://{BUCKET}/{DATA_PREFIX}/{path}/"
+
+
+def parse_ls_output(output: str, base_path: str) -> List[S3Object]:
+    """Parse aws s3 ls output into S3Object list."""
+    objects = []
+
+    for line in output.strip().split("\n"):
+        if not line.strip():
+            continue
+
+        # Directory format: "                           PRE dirname/"
+        if line.strip().startswith("PRE "):
+            dirname = line.strip()[4:].rstrip("/")
+            objects.append(S3Object(name=dirname, is_dir=True))
+        else:
+            # File format: "2024-01-15 10:30:45    12345 filename"
+            parts = line.split()
+            if len(parts) >= 4:
+                date_str = parts[0]
+                time_str = parts[1]
+                size = int(parts[2])
+                name = " ".join(parts[3:])  # Handle filenames with spaces
+
+                try:
+                    last_modified = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    last_modified = None
+
+                objects.append(S3Object(
+                    name=name,
+                    is_dir=False,
+                    size=size,
+                    last_modified=last_modified
+                ))
+
+    return objects
+
+
+def list_path(path: str, recursive: bool = False) -> List[S3Object]:
+    """List contents of S3 path."""
+    s3_path = normalize_path(path)
+
+    cmd = ["aws", "s3", "ls", s3_path]
+    if recursive:
+        cmd.append("--recursive")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        if "NoSuchKey" in result.stderr or not result.stdout.strip():
+            return []
+        print(f"Error: {result.stderr}", file=sys.stderr)
+        return []
+
+    return parse_ls_output(result.stdout, s3_path)
+
+
+def print_simple(objects: List[S3Object]) -> None:
+    """Print simple listing (names only)."""
+    dirs = sorted([o for o in objects if o.is_dir], key=lambda x: x.name)
+    files = sorted([o for o in objects if not o.is_dir], key=lambda x: x.name)
+
+    # Print directories first (with trailing /)
+    for obj in dirs:
+        print(f"\033[1;34m{obj.name}/\033[0m")  # Blue for directories
+
+    # Then files
+    for obj in files:
+        print(obj.name)
+
+
+def print_long(objects: List[S3Object]) -> None:
+    """Print long format listing."""
+    dirs = sorted([o for o in objects if o.is_dir], key=lambda x: x.name)
+    files = sorted([o for o in objects if not o.is_dir], key=lambda x: x.name)
+
+    # Print directories first
+    for obj in dirs:
+        print(f"{'drw-r--r--':<12} {'-':>8}  {'-':>19}  \033[1;34m{obj.name}/\033[0m")
+
+    # Then files with size and date
+    for obj in files:
+        size_str = format_size(obj.size) if obj.size is not None else "-"
+        date_str = obj.last_modified.strftime("%Y-%m-%d %H:%M:%S") if obj.last_modified else "-"
+        print(f"{'-rw-r--r--':<12} {size_str:>8}  {date_str:>19}  {obj.name}")
+
+    # Summary
+    total_size = sum(o.size or 0 for o in files)
+    print(f"\n{len(dirs)} directories, {len(files)} files ({format_size(total_size)} total)")
+
+
+def print_tree(path: str, prefix: str = "", depth: int = 0, max_depth: int = 3) -> None:
+    """Print tree view of S3 path."""
+    if depth >= max_depth:
+        print(f"{prefix}...")
+        return
+
+    objects = list_path(path)
+    dirs = sorted([o for o in objects if o.is_dir], key=lambda x: x.name)
+    files = sorted([o for o in objects if not o.is_dir], key=lambda x: x.name)
+
+    items = dirs + files
+
+    for i, obj in enumerate(items):
+        is_last = (i == len(items) - 1)
+        connector = "└── " if is_last else "├── "
+        next_prefix = prefix + ("    " if is_last else "│   ")
+
+        if obj.is_dir:
+            print(f"{prefix}{connector}\033[1;34m{obj.name}/\033[0m")
+            # Recurse into directory
+            new_path = f"{path.rstrip('/')}/{obj.name}"
+            print_tree(new_path, next_prefix, depth + 1, max_depth)
+        else:
+            size_str = f" ({format_size(obj.size)})" if obj.size else ""
+            print(f"{prefix}{connector}{obj.name}{size_str}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="List S3 bucket contents",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("path", nargs="?", default="", help="S3 path to list (default: data/)")
+    parser.add_argument("-l", "--long", action="store_true", help="Long format with sizes and dates")
+    parser.add_argument("-r", "--recursive", action="store_true", help="Recursive listing")
+    parser.add_argument("--tree", action="store_true", help="Tree view")
+    parser.add_argument("--depth", type=int, default=3, help="Max depth for tree view (default: 3)")
+
+    args = parser.parse_args()
+
+    if args.tree:
+        s3_path = normalize_path(args.path)
+        print(f"\033[1m{s3_path}\033[0m")
+        print_tree(args.path, max_depth=args.depth)
+        return 0
+
+    objects = list_path(args.path, recursive=args.recursive)
+
+    if not objects:
+        s3_path = normalize_path(args.path)
+        print(f"No objects found at {s3_path}")
+        return 0
+
+    if args.long:
+        print_long(objects)
+    else:
+        print_simple(objects)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

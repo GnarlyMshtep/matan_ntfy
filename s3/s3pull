@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""
+s3pull - Pull files/directories from S3.
+
+Usage:
+    s3pull <s3_path> [<local_dest>]     # Download from data/ prefix
+    s3pull <s3_path> --sync             # Use aws s3 sync for directories
+
+Examples:
+    s3pull myrepo/outputs/model.pt ./           # Download single file
+    s3pull experiments/run1/ ./local_run1/      # Download directory
+    s3pull experiments/run1/ . --sync           # Sync directory
+"""
+import argparse
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+
+BUCKET = "matan-ml-exp-bucket"
+DATA_PREFIX = "data"
+
+
+@dataclass
+class PullResult:
+    success: bool
+    s3_path: str
+    local_path: str
+    message: str
+
+
+def normalize_s3_path(s3_path: str) -> str:
+    """Normalize S3 path to full s3:// URL."""
+    s3_path = s3_path.strip()
+
+    # Already a full S3 URL
+    if s3_path.startswith("s3://"):
+        return s3_path
+
+    # Remove leading slash if present
+    s3_path = s3_path.lstrip("/")
+
+    # If it starts with bucket name, add s3://
+    if s3_path.startswith(BUCKET):
+        return f"s3://{s3_path}"
+
+    # If it starts with data/, add bucket
+    if s3_path.startswith(f"{DATA_PREFIX}/"):
+        return f"s3://{BUCKET}/{s3_path}"
+
+    # Otherwise, assume it's under data/
+    return f"s3://{BUCKET}/{DATA_PREFIX}/{s3_path}"
+
+
+def is_s3_directory(s3_path: str) -> bool:
+    """Check if S3 path is a directory (has contents beneath it)."""
+    # Directories in S3 either end with / or have objects with that prefix
+    if s3_path.endswith("/"):
+        return True
+
+    # Check if there are objects with this prefix
+    cmd = ["aws", "s3", "ls", s3_path + "/", "--summarize"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    # If listing succeeds and shows objects, it's a directory
+    return "Total Objects:" in result.stdout and "Total Objects: 0" not in result.stdout
+
+
+def pull_file(s3_path: str, local_path: Path) -> PullResult:
+    """Pull a single file from S3."""
+    cmd = ["aws", "s3", "cp", s3_path, str(local_path)]
+    print(f"Downloading: {s3_path} → {local_path}")
+
+    # Stream output in real-time (don't capture)
+    result = subprocess.run(cmd)
+
+    if result.returncode == 0:
+        return PullResult(True, s3_path, str(local_path), "Download successful")
+    else:
+        return PullResult(False, s3_path, str(local_path), "Download failed")
+
+
+def pull_directory(s3_path: str, local_path: Path, sync: bool = False) -> PullResult:
+    """Pull a directory from S3."""
+    # Ensure paths are properly formatted
+    if not s3_path.endswith("/"):
+        s3_path += "/"
+
+    local_path.mkdir(parents=True, exist_ok=True)
+
+    if sync:
+        cmd = ["aws", "s3", "sync", s3_path, str(local_path)]
+        action = "Syncing"
+    else:
+        cmd = ["aws", "s3", "cp", "--recursive", s3_path, str(local_path)]
+        action = "Downloading"
+
+    print(f"{action}: {s3_path} → {local_path}/")
+
+    # Stream output in real-time (don't capture)
+    result = subprocess.run(cmd)
+
+    if result.returncode == 0:
+        return PullResult(True, s3_path, str(local_path), f"{action} successful")
+    else:
+        return PullResult(False, s3_path, str(local_path), f"{action} failed")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Pull files/directories from S3",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("s3_path", help="S3 path (under data/ prefix, or full s3:// URL)")
+    parser.add_argument("local_dest", nargs="?", default=".", type=Path, help="Local destination (default: current dir)")
+    parser.add_argument("--sync", action="store_true", help="Use sync instead of cp for directories")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be downloaded without downloading")
+
+    args = parser.parse_args()
+
+    s3_path = normalize_s3_path(args.s3_path)
+    local_dest: Path = args.local_dest.resolve()
+
+    if args.dry_run:
+        print(f"Would download: {s3_path} → {local_dest}")
+        return 0
+
+    # Determine if source is a file or directory
+    is_dir = is_s3_directory(s3_path)
+
+    if is_dir:
+        result = pull_directory(s3_path, local_dest, sync=args.sync)
+    else:
+        # If local_dest is a directory, append the filename
+        if local_dest.is_dir() or str(local_dest).endswith("/"):
+            local_dest.mkdir(parents=True, exist_ok=True)
+            filename = s3_path.rstrip("/").split("/")[-1]
+            local_dest = local_dest / filename
+        result = pull_file(s3_path, local_dest)
+
+    if result.success:
+        print(f"✓ {result.message}")
+        print(f"  → {result.local_path}")
+        return 0
+    else:
+        print(f"✗ Error: {result.message}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
